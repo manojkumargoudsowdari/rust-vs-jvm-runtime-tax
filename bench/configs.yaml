@@ -1,0 +1,42 @@
+# Benchmark matrix. Every value here is copied into manifest.json for each run.
+
+images:
+  rust: rvj-rust:latest     # built by `make images` (docker/rust.Dockerfile)
+  scala: rvj-scala:latest   # built by `make images` (docker/scala.Dockerfile)
+
+# Resource envelope R = {vCPUs = 4, Memory Max = 4 GB}; swap disabled.
+container:
+  cpus: "4"
+  memory: 4g
+  memory_swap: 4g
+  cores: 4                  # physical cores picked by docker/pick-cores.sh unless --cpuset is given
+
+pipeline:
+  workers: 4
+  batch_size: 8192
+
+jvm_common: ["-Xms3G", "-Xmx3G", "-XX:+AlwaysPreTouch"]
+
+configs:
+  rust-system:
+    image: rust
+    command: ["pipeline-rust"]
+  rust-mimalloc:
+    image: rust
+    command: ["pipeline-rust-mimalloc"]
+  scala-g1:
+    image: scala
+    jvm_flags: ["-XX:+UseG1GC"]
+  scala-zgc:
+    image: scala
+    jvm_flags: ["-XX:+UseZGC", "-XX:+ZGenerational"]
+  scala-parallel:
+    image: scala
+    jvm_flags: ["-XX:+UseParallelGC"]
+
+protocol:
+  runs: 10                  # measured runs per config, executed in randomized order
+  jvm_warmup_runs: 2        # per JVM config, on the warm-up dataset; discarded
+  nmt_runs: 1               # per JVM config, NativeMemoryTracking=summary; excluded from timing
+  sample_hz: 10             # host-side cgroup sampling frequency
+  drop_caches: true         # sync + echo 3 > /proc/sys/vm/drop_caches before every run (root)

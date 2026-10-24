@@ -1,6 +1,12 @@
 ThisBuild / scalaVersion := "3.5.0"
 ThisBuild / organization := "rvj"
 
+def isSignature(f: String): Boolean =
+  Seq(".SF", ".DSA", ".RSA").exists(ext => f.toUpperCase.endsWith(ext))
+
+def isLegalNotice(f: String): Boolean =
+  Seq("LICENSE", "NOTICE").exists(f.toUpperCase.startsWith)
+
 lazy val root = (project in file("."))
   .settings(
     name := "pipeline-scala",
@@ -16,10 +22,18 @@ lazy val root = (project in file("."))
     scalacOptions ++= Seq("-deprecation", "-feature", "-release", "21"),
     Compile / mainClass := Some("rvj.Main"),
     assembly / assemblyJarName := "pipeline-scala.jar",
+    // Explicit merge policy: anything not listed must be byte-identical across
+    // jars (`deduplicate` fails the build on a content conflict).
     assembly / assemblyMergeStrategy := {
-      case PathList("META-INF", "services", _*) => MergeStrategy.concat
-      case PathList("META-INF", _*)             => MergeStrategy.discard
-      case "module-info.class"                  => MergeStrategy.discard
-      case _                                    => MergeStrategy.first
+      case PathList("META-INF", "services", _*)                => MergeStrategy.filterDistinctLines
+      case PathList("META-INF", "MANIFEST.MF")                 => MergeStrategy.discard
+      case PathList("META-INF", f) if isSignature(f)           => MergeStrategy.discard
+      // Legal notices differ per jar; keep every copy (renamed per source jar).
+      case PathList("META-INF", f) if isLegalNotice(f)         => MergeStrategy.rename
+      // Embedded pom.xml/pom.properties are build metadata, never read at runtime.
+      case PathList("META-INF", "maven", _*)                   => MergeStrategy.discard
+      case PathList(path @ _*) if path.last == "module-info.class" => MergeStrategy.discard
+      case "reference.conf" | "application.conf"               => MergeStrategy.concat
+      case _                                                   => MergeStrategy.deduplicate
     }
   )

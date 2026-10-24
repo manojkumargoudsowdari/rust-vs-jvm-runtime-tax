@@ -51,6 +51,9 @@ Determinism: file *i* uses `ChaCha8Rng::seed_from_u64(seed)` with stream *i*,
 so output is byte-identical for a given (seed, rows, files, row-group-size,
 container image) regardless of thread count.
 
+**Row-group size is 65,536 rows (~69 MB) to stay memory-bounded under the
+4 GB cgroup: 4 workers × one in-memory row group ≈ 280 MB.**
+
 Row-group size default: **65,536 rows (~69 MB)**, *not* 1,048,576.
 A 1 Mi-row group is ~1.1 GB; parquet-java materializes a whole row group in
 memory, so 4 workers would need ~4.4 GB against a 3 GB heap and the Scala
@@ -113,12 +116,19 @@ two outputs are bit-identical and reproducible across runs.
 
 ### Instrumentation (same format in both)
 
-- `batches.csv`: `batch_id,worker,start_nanos,rows,nanos`
+- `batches.csv`: `batch_id,worker,start_nanos,rows,nanos,setup_nanos`
   - `batch_id` = `<file_idx>-<row_group>-<batch_idx>`
-  - `nanos` = time since the previous batch of the same unit ended (or since
-    the unit started, for batch 0). Batch 0 therefore includes opening the
-    file and loading/locating the row group, in both languages, so the sum of
-    batch times equals the unit time.
+  - **Per-batch latency (the paper's definition) = `nanos` = time to process
+    one 8,192-row record batch**: decode + materialize rows + filter +
+    transform + aggregate.
+  - `setup_nanos` (non-zero only on batch 0 of each unit) = opening the file,
+    reading the footer and preparing the row-group reader. It is logged
+    separately so that batch latency is not polluted by per-unit setup.
+    Note the library asymmetry: parquet-java's `readRowGroup` reads the whole
+    row group from disk during setup, whereas arrow-rs reads pages lazily, so
+    Rust's page I/O falls inside `nanos` and Scala's inside `setup_nanos`.
+    The analysis therefore also reports `nanos + setup_nanos` per unit as a
+    sensitivity check.
   - `start_nanos` is relative to process start (for correlating with GC).
   - Rows are buffered in memory and written after processing ends.
 - `summary.json`: `lang, workers, batch_size, files, units, rows_read,
@@ -148,38 +158,66 @@ two outputs are bit-identical and reproducible across runs.
 - Writer: `ExampleParquetWriter` on `LocalOutputFile`, then
   `FileChannel.force(true)`.
 
-## 6. Docker and isolation (docker/) — after verify
+## 6. Docker and isolation (docker/)
 
-`--cpus=4 --memory=4g --memory-swap=4g --cpuset-cpus=<4 physical cores>`;
-`docker/pick-cores.sh` uses `lscpu -e` to choose 4 cores whose SMT siblings
-stay idle. Data mounted read-only; output on a separate volume.
+- `docker/rust.Dockerfile`, `docker/scala.Dockerfile`: multi-stage builds,
+  base images pinned by digest, sbt tarball verified by SHA-256. Runtime
+  entrypoint `docker/run-wrapper.sh` runs the pipeline and, before exiting,
+  snapshots the container's own cgroup files (`cpu.stat`, `memory.*`) — the
+  host-side cgroup directory disappears when the container stops.
+- Run flags: `--cpus=4 --memory=4g --memory-swap=4g --cpuset-cpus=<cores>
+  --network none --user <uid>:<gid>`; data mounted read-only, per-run output
+  directory mounted read-write.
+- `docker/pick-cores.sh N` picks N logical CPUs on N distinct physical cores
+  (one NUMA node, skipping core 0) so that SMT siblings stay unassigned.
 
-## 7. Benchmark harness (bench/) — after verify
+## 7. Benchmark harness (bench/)
 
-Configurations: `rust-system`, `rust-mimalloc`, `scala-g1`, `scala-zgc`
-(`-XX:+UseZGC -XX:+ZGenerational`), `scala-parallel`; all JVM runs
-`-Xms3G -Xmx3G -XX:+AlwaysPreTouch`, JFR with `profiling/gc.jfc`,
-`-Xlog:gc*:file=...`.
+`bench/run.py` + `bench/configs.yaml`. Configurations: `rust-system`,
+`rust-mimalloc`, `scala-g1`, `scala-zgc` (`-XX:+UseZGC -XX:+ZGenerational`),
+`scala-parallel`; all JVM runs `-Xms3G -Xmx3G -XX:+AlwaysPreTouch`, JFR with
+`profiling/gc.jfc`, `-Xlog:gc*`.
 
-Measurement corrections relative to the original spec:
+**Host gate.** Timed runs are refused unless the host is Linux,
+`stat -fc %T /sys/fs/cgroup` is `cgroup2fs`, the CPU does not report the
+`hypervisor` flag, and the page cache can be dropped (root or passwordless
+sudo). `--dry-run` bypasses the gate; such results are suffixed `-dryrun`,
+flagged in `manifest.json` and `runs.csv`, and `analysis/analyze.py` refuses
+them unless `--allow-dry-run` (then every figure and table is watermarked).
 
-- **Memory:** cgroup v2 `memory.peak` includes page cache, which a streaming
-  1 TB read fills up to the limit for *every* configuration. We sample
-  `memory.stat` (`anon`, `kernel`, `file`) and process RSS at 10 Hz and report
-  peak `anon + kernel` as the primary metric; `memory.peak` is kept as a
-  secondary column.
-- **Minimum-heap experiment:** because `-Xms3G` + `AlwaysPreTouch` pins JVM
-  RSS ≥ 3 GB by construction, an additional experiment bisects the smallest
-  `-Xmx` at which each GC completes the small preset.
-- **Cost:** report both *provisioned* (4 vCPU × wall time) and *consumed*
-  (`cpu.stat usage_usec`) vCPU-hours; rates come from a YAML file with
-  placeholders, never hardcoded.
-- **GC:** parse `jdk.GarbageCollection` **and** `jdk.GCPhasePause` via
-  `jfr print --json`. ZGC's cost appears mainly as CPU, not pauses.
-- Page cache dropped before each run (root). JVM warm-up runs on small preset
-  (discarded). N=10 measured runs per config, randomized order.
-- `results/<timestamp>/manifest.json`: git SHA, image digests, versions, CPU
-  model, kernel, flags, core set.
+**Memory (10 Hz host sampler, `bench/sampler.py`).** Each sample records
+`memory.current`, `memory.peak`, `memory.stat` (`anon`, `file`, `kernel`,
+`shmem`, `sock`, …) and `cpu.stat usage_usec`.
+**M_peak = max(anon + shmem)**, not `anon` alone: ZGC backs the Java heap with
+memfd shared memory, which cgroup v2 accounts as `shmem` (inside `file`).
+Found in the first dry run — `anon` showed ≈130 MiB for ZGC against a 3 GB
+committed heap (NMT confirmed ≈3.2 GB committed). Page cache = `file − shmem`,
+reported separately with `memory.current` and `memory.peak`.
+
+**JVM memory detail.** JFR `jdk.GCHeapSummary` gives heap used/committed per
+GC. One extra run per JVM config adds `-XX:NativeMemoryTracking=summary
+-XX:+PrintNMTStatistics`; these `nmt` runs are excluded from timing stats.
+
+**Minimum-heap experiment (TODO).** Because `-Xms3G` + `AlwaysPreTouch` fixes
+JVM footprint ≥ 3 GB by construction, a separate experiment should bisect the
+smallest `-Xmx` at which each GC completes the small preset.
+
+**Protocol.** Page cache dropped before every run. 2 JVM warm-up runs per JVM
+config on the warm-up dataset (discarded). N = 10 measured runs per config in
+an order shuffled with a recorded seed. 1 NMT run per JVM config at the end.
+After all runs: JFR parsed with `jfr print --json` (`bench/jfrparse.py`), and
+every run's `output.parquet` is checked bit-identical.
+
+**Manifest.** git SHA/dirty/describe, host (OS, kernel, CPU model, logical
+CPUs, SMT control/active, governors, cpufreq driver, boost/turbo state, THP,
+kernel cmdline, hypervisor flag, systemd-detect-virt), Docker server/client
+versions, cgroup driver/version, image IDs + repo digests + labels, cpuset and
+how it was chosen, dataset descriptor, full resolved config and per-config
+container commands, schedule + seed, output check, failed runs.
+
+**Cost.** `analysis/cost.yaml` holds a placeholder `vcpu_hour` rate (null);
+the cost table is emitted only when it is filled in. Both provisioned
+(4 vCPU × wall) and consumed (`usage_usec`) vCPU-hours are reported.
 
 ## 8. Analysis (analysis/) — after verify
 
@@ -218,6 +256,22 @@ booktabs LaTeX tables.
   - Known build note: sbt-assembly resolves 564 duplicate classpath entries
     with `MergeStrategy.first` (overlap between hadoop-client-api/runtime and
     parquet-java transitive deps); to be audited before the artifact release.
+
+- **2026-10-24 — harness milestone** (development machine; dry runs only, *no
+  performance numbers recorded*):
+  - Fat-jar merge made explicit; no `.class` content conflicts (see
+    `docs/fat-jar-merge.md`).
+  - Small preset (10 M rows, 8 files, 160 units): all five configurations
+    bit-identical (720 groups, 8,412,919 rows kept); 1,224 batch ids match
+    between languages.
+  - Docker images build; harness dry run on the dev preset completed 21 runs
+    (warm-up, measured, NMT) with 18 outputs bit-identical, JFR parsed,
+    analysis produced all figures and tables (watermarked).
+  - Batch log gained `setup_nanos`; `nanos` is now strictly the per-batch
+    latency.
+  - Measurement bug found and fixed: M_peak changed from `anon` to
+    `anon + shmem` (ZGC heap is memfd/shmem). NMT parser fixed for JDK 21's
+    byte-scaled output.
 
 ## 11. Order of work
 

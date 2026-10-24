@@ -1,0 +1,85 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  correctness:
+    name: build + dev-preset verify
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.81.0
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21.0.4+7
+
+      - uses: sbt/setup-sbt@v1
+        with:
+          sbt-runner-version: 1.10.2
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cache/coursier
+            ~/.ivy2/cache
+            ~/.sbt
+          key: deps-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'pipeline-scala/build.sbt', 'pipeline-scala/project/*') }}
+
+      - run: pip install -r bench/requirements.txt
+
+      - name: build (Rust system + mimalloc, Scala fat jar with tests)
+        run: make build
+
+      - name: unit tests + integration test (dev preset, verify)
+        run: make test PRESET=dev
+
+  harness:
+    name: docker images + harness dry run
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install -r bench/requirements.txt -r analysis/requirements.txt
+
+      - name: build images
+        run: make images
+
+      - name: generate a tiny dataset
+        run: |
+          mkdir -p data/tiny
+          docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/data:/data" --entrypoint datagen \
+            rvj-rust:latest --rows 200000 --files 4 --out /data/tiny
+
+      # GitHub runners are VMs, so timings are refused; --dry-run checks the plumbing only.
+      - name: harness dry run
+        run: |
+          python bench/run.py --data data/tiny --dry-run --runs 1 --warmups 1 --nmt-runs 1 \
+            --results results --seed 1
+
+      - name: analysis (dry run)
+        run: python analysis/analyze.py results/*-dryrun --allow-dry-run --bootstrap 50
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: harness-dry-run
+          path: results/*-dryrun/
+          retention-days: 7

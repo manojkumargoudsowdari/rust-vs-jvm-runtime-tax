@@ -1,0 +1,12 @@
+.git
+target
+data
+out
+results
+**/target
+pipeline-scala/project/project
+pipeline-scala/.bsp
+**/__pycache__
+.venv
+*.parquet
+*.jfr

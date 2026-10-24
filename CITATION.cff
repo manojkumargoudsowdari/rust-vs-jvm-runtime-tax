@@ -1,0 +1,25 @@
+cff-version: 1.2.0
+message: "If you use this artifact, please cite it as below."
+title: "rust-vs-jvm-runtime-tax: benchmark artifact for Quantifying the Runtime Tax"
+abstract: >-
+  Reproducible benchmark comparing a native Rust pipeline and a standalone
+  Scala 3 (JVM) pipeline on an identical uncompressed Parquet workload under
+  identical cgroup resource limits, measuring CPU-seconds, peak anonymous
+  memory, per-batch latency, GC pauses and modeled cloud cost.
+type: software
+authors:
+  - given-names: Manoj Kumar Goud
+    family-names: Sowdari
+  - given-names: Akshay Kumar Goud
+    family-names: Sowdari
+repository-code: "https://github.com/manojkumargoudsowdari/rust-vs-jvm-runtime-tax"
+license: Apache-2.0
+version: 0.2.0
+keywords:
+  - Rust
+  - Scala
+  - JVM
+  - garbage collection
+  - benchmarking
+  - Apache Parquet
+  - cloud cost

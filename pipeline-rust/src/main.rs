@@ -84,7 +84,11 @@ struct BatchRecord {
     worker: usize,
     start_nanos: u128,
     rows: usize,
+    /// Time to process this batch: decode + materialize + filter/transform/aggregate.
     nanos: u128,
+    /// Unit setup before the first batch (open file, read footer, prepare reader);
+    /// non-zero only on batch 0 of each unit.
+    setup_nanos: u128,
 }
 
 struct UnitResult {
@@ -141,7 +145,8 @@ fn run_unit(
         .build()?;
 
     let mut result = UnitResult { groups: HashMap::new(), rows_read: 0, rows_kept: 0 };
-    let mut prev = unit_start;
+    let mut prev = Instant::now();
+    let setup_nanos = (prev - unit_start).as_nanos();
     for (batch_idx, batch) in reader.enumerate() {
         let batch = batch?;
         let rows = materialize(&batch);
@@ -157,6 +162,7 @@ fn run_unit(
             start_nanos: (prev - t0).as_nanos(),
             rows: batch.num_rows(),
             nanos: (now - prev).as_nanos(),
+            setup_nanos: if batch_idx == 0 { setup_nanos } else { 0 },
         });
         prev = now;
     }
@@ -194,12 +200,12 @@ fn write_output(path: &Path, groups: &BTreeMap<i64, Agg>) -> Result<(), Error> {
 
 fn write_batch_log(path: &Path, log: &[BatchRecord]) -> std::io::Result<()> {
     let mut w = BufWriter::new(File::create(path)?);
-    writeln!(w, "batch_id,worker,start_nanos,rows,nanos")?;
+    writeln!(w, "batch_id,worker,start_nanos,rows,nanos,setup_nanos")?;
     for r in log {
         writeln!(
             w,
-            "{}-{}-{},{},{},{},{}",
-            r.file, r.row_group, r.batch, r.worker, r.start_nanos, r.rows, r.nanos
+            "{}-{}-{},{},{},{},{},{}",
+            r.file, r.row_group, r.batch, r.worker, r.start_nanos, r.rows, r.nanos, r.setup_nanos
         )?;
     }
     w.flush()

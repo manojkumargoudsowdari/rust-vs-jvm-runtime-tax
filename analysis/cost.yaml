@@ -1,0 +1,12 @@
+# Cost model inputs. No prices are hardcoded anywhere in this repository:
+# fill these in from your provider's current price list and record where
+# they came from. Cost tables are not emitted while vcpu_hour is null.
+currency: USD
+rates:
+  vcpu_hour: null        # price per vCPU-hour (e.g. on-demand instance price / instance vCPUs)
+reference:
+  provider: null         # e.g. "AWS EC2 On-Demand"
+  instance_type: null    # e.g. a general-purpose 4-vCPU type
+  region: null
+  price_source: null     # URL of the price list
+  retrieved: null        # date the price was read (YYYY-MM-DD)

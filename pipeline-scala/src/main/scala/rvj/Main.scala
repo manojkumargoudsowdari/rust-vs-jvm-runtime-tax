@@ -31,7 +31,19 @@ final case class Config(
     summary: Option[Path]
 )
 
-final case class BatchRecord(file: Int, rowGroup: Int, batch: Int, worker: Int, startNanos: Long, rows: Int, nanos: Long)
+/** `nanos`: time to process this batch (materialize + filter/transform/aggregate).
+  * `setupNanos`: unit setup before the first batch (open, footer, readRowGroup); non-zero only on batch 0.
+  */
+final case class BatchRecord(
+    file: Int,
+    rowGroup: Int,
+    batch: Int,
+    worker: Int,
+    startNanos: Long,
+    rows: Int,
+    nanos: Long,
+    setupNanos: Long
+)
 
 final class UnitResult(val groups: LongMap[Agg], var rowsRead: Long, var rowsKept: Long)
 
@@ -127,7 +139,8 @@ object Main:
       val result = UnitResult(LongMap.empty[Agg], 0L, 0L)
       val rows = new Array[Row](cfg.batchSize)
       var remaining = pages.getRowCount
-      var prev = unitStart
+      var prev = System.nanoTime()
+      val setupNanos = prev - unitStart
       var batch = 0
       while remaining > 0 do
         val n = math.min(cfg.batchSize.toLong, remaining).toInt
@@ -139,7 +152,7 @@ object Main:
         result.rowsKept += Workload.processBatch(rows, n, result.groups)
 
         val now = System.nanoTime()
-        log += BatchRecord(file, rowGroup, batch, worker, prev - t0, n, now - prev)
+        log += BatchRecord(file, rowGroup, batch, worker, prev - t0, n, now - prev, if batch == 0 then setupNanos else 0L)
         prev = now
         remaining -= n
         batch += 1
@@ -174,9 +187,9 @@ object Main:
 
   private def writeBatchLog(path: Path, log: Seq[BatchRecord]): Unit =
     Using.resource(Files.newBufferedWriter(path, StandardCharsets.UTF_8)) { w =>
-      w.write("batch_id,worker,start_nanos,rows,nanos\n")
+      w.write("batch_id,worker,start_nanos,rows,nanos,setup_nanos\n")
       for r <- log do
-        w.write(s"${r.file}-${r.rowGroup}-${r.batch},${r.worker},${r.startNanos},${r.rows},${r.nanos}\n")
+        w.write(s"${r.file}-${r.rowGroup}-${r.batch},${r.worker},${r.startNanos},${r.rows},${r.nanos},${r.setupNanos}\n")
     }
 
   def main(args: Array[String]): Unit =
