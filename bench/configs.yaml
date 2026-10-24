@@ -15,6 +15,9 @@ pipeline:
   workers: 4
   batch_size: 8192
 
+# "Production-style" JVM configuration (bench/run.py): fixed, pre-touched 3 GiB heap,
+# as a capacity-planned service would run. JVM memory here reflects the setting, not
+# the need; the heap sweep below measures the need.
 jvm_common: ["-Xms3G", "-Xmx3G", "-XX:+AlwaysPreTouch"]
 
 configs:
@@ -40,3 +43,26 @@ protocol:
   nmt_runs: 1               # per JVM config, NativeMemoryTracking=summary; excluded from timing
   sample_hz: 10             # host-side cgroup sampling frequency
   drop_caches: true         # sync + echo 3 > /proc/sys/vm/drop_caches before every run (root)
+
+# Heap-size sweep (bench/heapsweep.py), after Hertz & Berger (OOPSLA 2005).
+# Phase 1 binary-searches H_min per collector; phase 2 runs each collector at
+# multiples of its own H_min. -Xms = -Xmx, and NO -XX:+AlwaysPreTouch, so that
+# resident memory reflects what the JVM actually touches.
+heapsweep:
+  collectors: [scala-g1, scala-zgc, scala-parallel]   # GC flags taken from `configs`
+  references: [rust-system, rust-mimalloc]            # flat reference lines
+  search:
+    low_mib: 128             # lower bound tried first (passes => H_min = low_mib)
+    high_mib: 3072           # must pass; the production-style heap
+    granularity_mib: 128
+    attempts: 3              # a probe passes only if all attempts succeed
+    timeout_factor: 10       # probe timeout = factor x wall time of the high_mib probe ...
+    timeout_min_s: 120       # ... but never less than this
+  multiples: [1.25, 1.5, 2, 3, 4]
+  # heap + off-heap must fit the 4096 MiB cgroup. NMT on a 3 GiB heap measured
+  # ~200-250 MiB non-heap committed (dev preset); 768 MiB leaves headroom for
+  # metaspace, thread stacks, direct buffers and JFR. Points above the cap are skipped.
+  cgroup_mib: 4096
+  offheap_reserve_mib: 768
+  runs: 10                   # measured runs per (collector, multiple) and per reference
+  warmup_runs: 1             # per (collector, multiple); discarded

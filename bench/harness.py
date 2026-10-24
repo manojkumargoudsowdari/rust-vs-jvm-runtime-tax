@@ -1,0 +1,306 @@
+"""Shared machinery for bench/run.py and bench/heapsweep.py: host gate, container
+runs with cgroup sampling, JFR/NMT parsing, manifests."""
+
+from __future__ import annotations
+
+import csv
+import datetime as dt
+import json
+import os
+import platform
+import re
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+import yaml
+
+import hostinfo
+import jfrparse
+import verify
+from sampler import CgroupSampler, container_cgroup
+
+REPO = Path(__file__).resolve().parent.parent
+JAR = "/opt/rvj/pipeline-scala.jar"
+JFC = "/opt/rvj/gc.jfc"
+
+RUN_COLUMNS = [
+    "run_id", "config", "kind", "order", "preset", "dry_run", "exit_code", "oom_killed", "java_oom", "timed_out",
+    "wall_ns", "host_wall_ns", "pipeline_wall_ns",
+    "cpu_usage_usec", "cpu_user_usec", "cpu_system_usec", "cpu_throttled_usec",
+    "peak_private_bytes", "peak_anon_bytes", "peak_shmem_bytes", "peak_pagecache_bytes", "peak_file_bytes",
+    "peak_kernel_bytes", "peak_current_bytes", "memory_peak_bytes", "samples",
+    "rows_read", "rows_kept", "groups",
+    "gc_count", "gc_pause_count", "gc_pause_total_ns", "gc_pause_max_ns", "gc_duration_total_ns",
+    "z_alloc_stall_total_ns", "heap_used_max", "heap_committed_max",
+    "nmt_total_committed_bytes", "nmt_heap_committed_bytes",
+]
+
+
+def log(msg: str) -> None:
+    print(f"[{dt.datetime.now():%H:%M:%S}] {msg}", flush=True)
+
+
+def docker(*args: str, check: bool = True) -> str:
+    res = subprocess.run(["docker", *args], capture_output=True, text=True)
+    if check and res.returncode != 0:
+        raise RuntimeError(f"docker {' '.join(args[:2])} failed: {res.stderr.strip()}")
+    return res.stdout.strip()
+
+
+def utc_stamp() -> str:
+    return dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def load_yaml(path: Path) -> dict:
+    return yaml.safe_load(path.read_text())
+
+
+def is_jvm(conf: dict) -> bool:
+    return conf["image"] == "scala"
+
+
+# --------------------------------------------------------------------------- host and inputs
+
+def check_host(dry_run: bool, want_drop: bool) -> bool:
+    """Return whether caches will be dropped; exit if timings may not be recorded."""
+    blockers = hostinfo.timing_blockers()
+    can_drop = hostinfo.can_drop_caches()
+    if want_drop and not can_drop:
+        blockers.append("cannot drop the page cache: run as root or allow passwordless sudo")
+    if blockers and not dry_run:
+        for b in blockers:
+            print(f"refusing to record timings: {b}", file=sys.stderr)
+        print("(pass --dry-run to exercise the harness without recording valid timings)", file=sys.stderr)
+        sys.exit(2)
+    for b in blockers:
+        log(f"DRY RUN: ignoring host check: {b}")
+    return can_drop and want_drop
+
+
+def pick_cpuset(explicit: str | None, cores: int, dry_run: bool) -> tuple[str | None, str]:
+    if explicit:
+        return explicit, "--cpuset"
+    if platform.system() != "Linux":
+        return None, "none (non-Linux dry run)"
+    out = subprocess.run(["bash", str(REPO / "docker" / "pick-cores.sh"), str(cores)],
+                         capture_output=True, text=True)
+    if out.returncode != 0:
+        if dry_run:
+            return None, f"none (pick-cores failed: {out.stderr.strip()})"
+        sys.exit(f"pick-cores.sh failed: {out.stderr.strip()}")
+    return out.stdout.strip(), "docker/pick-cores.sh"
+
+
+def dataset_info(path: Path) -> dict:
+    files = sorted(path.glob("*.parquet"))
+    if not files:
+        sys.exit(f"no .parquet files in {path}")
+    desc = path / "datagen.json"
+    return {
+        "path": str(path),
+        "datagen": json.loads(desc.read_text()) if desc.exists() else None,
+        "files": len(files),
+        "bytes": sum(f.stat().st_size for f in files),
+    }
+
+
+def base_manifest(cfg: dict, dry_run: bool, stamp: str, cpuset: str | None, cpuset_source: str,
+                  drop: bool, data: dict) -> dict:
+    return {
+        "schema": 2,
+        "dry_run": dry_run,
+        "started_utc": stamp,
+        "argv": sys.argv,
+        "git": hostinfo.git_section(REPO),
+        "host": hostinfo.host_section(),
+        "docker": hostinfo.docker_section(cfg["images"]),
+        "cpuset": {"cpus": cpuset, "source": cpuset_source},
+        "drop_caches_effective": drop,
+        "dataset": data,
+        "config": cfg,
+    }
+
+
+# --------------------------------------------------------------------------- commands
+
+def pipeline_args(cfg: dict) -> list[str]:
+    p = cfg["pipeline"]
+    return ["--input", "/data", "--output", "/out/output.parquet", "--summary", "/out/summary.json",
+            "--batch-log", "/out/batches.csv", "--workers", str(p["workers"]), "--batch-size", str(p["batch_size"])]
+
+
+def rust_command(cfg: dict, conf: dict) -> list[str]:
+    return [*conf["command"], *pipeline_args(cfg)]
+
+
+def jvm_command(cfg: dict, heap_flags: list[str], gc_flags: list[str], *, jfr: bool = True,
+                nmt: bool = False) -> list[str]:
+    flags = [*heap_flags, *gc_flags]
+    if jfr:
+        flags += [f"-XX:StartFlightRecording=filename=/out/gc.jfr,settings={JFC},dumponexit=true",
+                  "-Xlog:gc*:file=/out/gc.log:uptime,level,tags"]
+    if nmt:
+        flags += ["-XX:NativeMemoryTracking=summary", "-XX:+UnlockDiagnosticVMOptions", "-XX:+PrintNMTStatistics"]
+    return ["java", *flags, "-jar", JAR, *pipeline_args(cfg)]
+
+
+# --------------------------------------------------------------------------- one container run
+
+def read_kv(path: Path) -> dict[str, int]:
+    if not path.exists():
+        return {}
+    return {k: int(v) for k, _, v in (l.partition(" ") for l in path.read_text().splitlines()) if v.isdigit()}
+
+
+def read_json(path: Path) -> dict:
+    return json.loads(path.read_text()) if path.exists() else {}
+
+
+def parse_nmt(stdout: Path, run_dir: Path) -> dict:
+    text = stdout.read_text() if stdout.exists() else ""
+    start = text.find("Native Memory Tracking:")
+    if start < 0:
+        return {}
+    block = text[start:]
+    (run_dir / "nmt.txt").write_text(block)
+    # JDK 21 prints bytes at exit (no unit); other scales print a KB/MB/GB suffix.
+    units = {"": 1, "B": 1, "KB": 2**10, "MB": 2**20, "GB": 2**30}
+
+    def committed(pattern: str) -> int | None:
+        m = re.search(pattern + r"reserved=\d+(?:[KMG]?B)?, committed=(\d+)([KMG]?B)?", block)
+        return int(m.group(1)) * units[m.group(2) or ""] if m else None
+
+    return {"nmt_total_committed_bytes": committed(r"Total: "),
+            "nmt_heap_committed_bytes": committed(r"Java Heap \(")}
+
+
+def execute(cfg: dict, *, image: str, command: list[str], run_dir: Path, data: Path, cpuset: str | None,
+            drop: bool, dry_run: bool, timeout_s: float | None = None) -> dict:
+    """Run one container under the resource envelope; return the measurement row."""
+    c = cfg["container"]
+    run_dir.mkdir(parents=True)
+    os.chmod(run_dir, 0o777)  # the container may run as a different uid
+
+    create = ["create", "--name", f"rvj-{run_dir.parent.parent.name}-{run_dir.name}"[:120], "--network", "none",
+              "--cpus", str(c["cpus"]), "--memory", c["memory"], "--memory-swap", c["memory_swap"],
+              "-v", f"{data.resolve()}:/data:ro", "-v", f"{run_dir.resolve()}:/out"]
+    if cpuset:
+        create += ["--cpuset-cpus", cpuset]
+    if hasattr(os, "getuid"):
+        create += ["--user", f"{os.getuid()}:{os.getgid()}"]
+    create += [image, *command]
+
+    if drop:
+        hostinfo.drop_caches()
+    cid = docker(*create)
+    timed_out = False
+    smp = None
+    try:
+        t0 = time.monotonic_ns()
+        docker("start", cid)
+        pid = int(docker("inspect", "--format", "{{.State.Pid}}", cid) or 0)
+        cgroup = container_cgroup(pid, cid) if pid else None
+        if cgroup:
+            smp = CgroupSampler(cgroup, cfg["protocol"]["sample_hz"], t0)
+            smp.start()
+        elif not dry_run:
+            log(f"WARNING: could not locate cgroup for {run_dir.name}; no samples for this run")
+        waiter = subprocess.Popen(["docker", "wait", cid], stdout=subprocess.PIPE, text=True)
+        try:
+            out, _ = waiter.communicate(timeout=timeout_s)
+            exit_code = int(out.strip())
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            docker("kill", cid, check=False)
+            out, _ = waiter.communicate()
+            exit_code = int(out.strip() or -1)
+        host_wall_ns = time.monotonic_ns() - t0
+        if smp:
+            smp.stop()
+            smp.write_csv(run_dir / "cgroup_samples.csv")
+        oom = docker("inspect", "--format", "{{.State.OOMKilled}}", cid) == "true"
+    finally:
+        docker("rm", "-f", cid, check=False)
+
+    wrapper = read_json(run_dir / "wrapper.json")
+    summary = read_json(run_dir / "summary.json")
+    if not wrapper and exit_code == 0:
+        # The container never wrote to the run directory (e.g. a path the Docker
+        # daemon cannot see). Never let such a run count as a success.
+        log(f"ERROR: {run_dir.name}: no wrapper.json in {run_dir}; marking the run as failed")
+        exit_code = -2
+    cpu = read_kv(run_dir / "cgroup_final" / "cpu.stat")
+    mem_peak = run_dir / "cgroup_final" / "memory.peak"
+    stderr = run_dir / "stderr.txt"
+    row = {
+        "run_id": run_dir.name, "dry_run": dry_run, "exit_code": exit_code, "oom_killed": oom,
+        "java_oom": stderr.exists() and "OutOfMemoryError" in stderr.read_text(errors="replace"),
+        "timed_out": timed_out,
+        "wall_ns": wrapper["end_ns"] - wrapper["start_ns"] if wrapper else None,
+        "host_wall_ns": host_wall_ns,
+        "pipeline_wall_ns": summary.get("wall_nanos"),
+        "cpu_usage_usec": cpu.get("usage_usec"), "cpu_user_usec": cpu.get("user_usec"),
+        "cpu_system_usec": cpu.get("system_usec"), "cpu_throttled_usec": cpu.get("throttled_usec"),
+        # M_peak: private memory = anon + shmem. ZGC backs its heap with memfd
+        # shared memory, which cgroup v2 accounts as shmem (inside `file`), not anon.
+        "peak_private_bytes": smp.peak_of(lambda r: r["anon"] + r["shmem"]) if smp else None,
+        "peak_anon_bytes": smp.peak("anon") if smp else None,
+        "peak_shmem_bytes": smp.peak("shmem") if smp else None,
+        "peak_pagecache_bytes": smp.peak_of(lambda r: r["file"] - r["shmem"]) if smp else None,
+        "peak_file_bytes": smp.peak("file") if smp else None,
+        "peak_kernel_bytes": smp.peak("kernel") if smp else None,
+        "peak_current_bytes": smp.peak("memory_current") if smp else None,
+        "memory_peak_bytes": int(mem_peak.read_text().split()[0]) if mem_peak.exists() else None,
+        "samples": len(smp.rows) if smp else 0,
+        "rows_read": summary.get("rows_read"), "rows_kept": summary.get("rows_kept"),
+        "groups": summary.get("groups"),
+    }
+    row.update(parse_nmt(run_dir / "stdout.txt", run_dir))
+    return row
+
+
+def status_line(row: dict) -> str:
+    if row["exit_code"] == 0:
+        status = "ok"
+    else:
+        status = f"exit {row['exit_code']}" + (" java-OOM" if row.get("java_oom") else "") \
+            + (" cgroup-OOM" if row.get("oom_killed") else "") + (" TIMEOUT" if row.get("timed_out") else "")
+    return (f"{status}; wall {(row['wall_ns'] or 0) / 1e9:.2f}s; cpu {(row['cpu_usage_usec'] or 0) / 1e6:.2f}s; "
+            f"peak anon+shmem {(row['peak_private_bytes'] or 0) / 2**20:.0f} MiB; samples {row['samples']}")
+
+
+# --------------------------------------------------------------------------- post-processing
+
+def parse_jfr(cfg: dict, run_dir: Path) -> dict:
+    if not (run_dir / "gc.jfr").exists():
+        return {}
+    res = subprocess.run(["docker", "run", "--rm", "--network", "none", "--entrypoint", "jfr",
+                          "-v", f"{run_dir.resolve()}:/out", cfg["images"]["scala"],
+                          "print", "--json", "--events", jfrparse.EVENTS, "/out/gc.jfr"],
+                         capture_output=True, text=True)
+    if res.returncode != 0:  # e.g. a recording truncated by a killed run
+        log(f"WARNING: jfr print failed for {run_dir.name}: {res.stderr.strip()[:200]}")
+        return {}
+    (run_dir / "gc.json").write_text(res.stdout)
+    totals = jfrparse.convert(run_dir / "gc.json", run_dir)
+    totals.pop("jvm_version", None)
+    return totals
+
+
+def write_csv(path: Path, rows: list[dict], columns: list[str]) -> None:
+    with path.open("w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=columns, extrasaction="ignore")
+        w.writeheader()
+        w.writerows(rows)
+
+
+def check_outputs(rows: list[dict], runs_dir: Path) -> dict:
+    paths = [runs_dir / r["run_id"] / "output.parquet" for r in rows
+             if r.get("kind") != "warmup" and r["exit_code"] == 0]
+    paths = [p for p in paths if p.exists()]
+    if len(paths) < 2:
+        return {"compared": len(paths), "identical": None, "errors": []}
+    errors = verify.compare_outputs(paths)
+    return {"compared": len(paths), "identical": not errors, "errors": errors[:20]}

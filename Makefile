@@ -13,7 +13,7 @@ BENCH_ARGS ?=
 RESULTS ?= $(lastword $(sort $(wildcard results/2*)))
 
 .PHONY: build build-rust build-rust-mimalloc build-scala datagen run verify test \
-        images bench plot clean
+        images bench heapsweep plot clean
 
 # --------------------------------------------------------------- native build + correctness
 
@@ -58,9 +58,17 @@ images:
 bench: images
 	$(PYTHON) bench/run.py --data $(DATA) --warmup-data $(WARMUP_DATA) $(if $(DRY_RUN),--dry-run) $(BENCH_ARGS)
 
+# Heap-size sweep (H_min search + multiples of H_min); defaults to the small preset.
+HEAPSWEEP_DATA ?= data/small
+heapsweep: images
+	$(PYTHON) bench/heapsweep.py --data $(HEAPSWEEP_DATA) $(if $(DRY_RUN),--dry-run) $(BENCH_ARGS)
+
 plot:
 	@test -n "$(RESULTS)" || { echo "no results/ directory; run 'make bench' first"; exit 1; }
-	$(PYTHON) analysis/analyze.py $(RESULTS) $(if $(DRY_RUN),--allow-dry-run)
+	@case "$(RESULTS)" in \
+	  *heapsweep*) $(PYTHON) analysis/heapsweep.py $(RESULTS) $(if $(DRY_RUN),--allow-dry-run) ;; \
+	  *) $(PYTHON) analysis/analyze.py $(RESULTS) $(if $(DRY_RUN),--allow-dry-run) ;; \
+	esac
 
 clean:
 	cargo clean

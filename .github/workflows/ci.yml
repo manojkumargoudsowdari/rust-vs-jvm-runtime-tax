@@ -76,7 +76,15 @@ jobs:
             --results results --seed 1
 
       - name: analysis (dry run)
-        run: python analysis/analyze.py results/*-dryrun --allow-dry-run --bootstrap 50
+        run: python analysis/analyze.py results/*Z-dryrun --allow-dry-run --bootstrap 50
+
+      - name: heap sweep dry run (full H_min search, reduced sweep)
+        run: |
+          python bench/heapsweep.py --data data/tiny --dry-run --runs 1 --warmups 0 \
+            --multiples 1.25,2 --results results --seed 1
+
+      - name: heap-sweep analysis (dry run)
+        run: python analysis/heapsweep.py results/*-heapsweep-dryrun --allow-dry-run
 
       - uses: actions/upload-artifact@v4
         with:

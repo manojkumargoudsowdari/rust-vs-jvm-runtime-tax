@@ -82,6 +82,9 @@ def convert(json_path: Path, out_dir: Path) -> dict:
         "gc_pause_count": len(pauses),
         "gc_pause_total_ns": sum(p["duration_ns"] for p in pauses),
         "gc_pause_max_ns": max((p["duration_ns"] for p in pauses), default=0),
+        # Sum of jdk.GarbageCollection durations: whole-cycle time, including the
+        # concurrent phases of ZGC/G1 (wall time of the GC cycle, not CPU time).
+        "gc_duration_total_ns": sum(c["duration_ns"] or 0 for c in collections),
         "z_alloc_stall_total_ns": sum(stalls),
         "heap_used_max": max((h["heap_used"] for h in heap), default=None),
         "heap_committed_max": max((h["heap_committed"] for h in heap), default=None),

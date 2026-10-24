@@ -20,6 +20,17 @@ results/<timestamp>/
 └── analysis/            # written by analysis/analyze.py: stats.json, summary_*.csv, fig_*, table_*.tex
 ```
 
+### Heap sweep (`bench/heapsweep.py`)
+
+`results/<timestamp>-heapsweep[-dryrun]/` has the same per-run layout plus
+`hmin.json` (every probe: heap, pass/fail, attempts run, failure reasons;
+H_min, baseline wall time and probe timeout per collector). `runs.csv` holds
+probe runs (`kind=probe`, JFR off), warm-ups and measured runs, with three
+extra columns: `heap_mib`, `multiple` (× H_min; empty for probes and Rust
+references) and `attempt` (probes only). `manifest.json` adds
+`hmin_search`, `sweep_points`, `skipped_points`, `heap_cap_mib` and
+`sweep_schedule`. `analysis/heapsweep.py` writes `analysis/`.
+
 ## Memory metrics
 
 | metric | definition |
@@ -37,13 +48,13 @@ results/<timestamp>/
 | `run_id` | `<order>-<config>-<kind>` |
 | `config`, `kind` | configuration from `bench/configs.yaml`; `measured`, `warmup` (discarded) or `nmt` (memory accounting only, excluded from timing) |
 | `order`, `preset`, `dry_run` | schedule position, dataset preset, dry-run flag |
-| `exit_code`, `oom_killed` | container outcome |
+| `exit_code`, `oom_killed`, `java_oom`, `timed_out` | container outcome; `java_oom` = `OutOfMemoryError` in stderr; `timed_out` = killed by the harness timeout |
 | `wall_ns` | in-container wall time of the pipeline process (includes JVM startup) |
 | `host_wall_ns` | `docker start` → `docker wait` on the host |
 | `pipeline_wall_ns` | wall time reported by the pipeline itself (main → output fsync) |
 | `cpu_usage_usec`, `cpu_user_usec`, `cpu_system_usec`, `cpu_throttled_usec` | cgroup `cpu.stat` at exit |
 | `peak_*_bytes`, `memory_peak_bytes`, `samples` | see *Memory metrics* |
 | `rows_read`, `rows_kept`, `groups` | from `summary.json` |
-| `gc_count`, `gc_pause_count`, `gc_pause_total_ns`, `gc_pause_max_ns`, `z_alloc_stall_total_ns` | from JFR (`jdk.GarbageCollection`, `jdk.GCPhasePause`, `jdk.ZAllocationStall`) |
+| `gc_count`, `gc_pause_count`, `gc_pause_total_ns`, `gc_pause_max_ns`, `gc_duration_total_ns`, `z_alloc_stall_total_ns` | from JFR (`jdk.GarbageCollection`, `jdk.GCPhasePause`, `jdk.ZAllocationStall`); `gc_duration_total_ns` = Σ GC-cycle durations (wall, incl. concurrent phases) |
 | `heap_used_max`, `heap_committed_max` | from JFR `jdk.GCHeapSummary` |
 | `nmt_total_committed_bytes`, `nmt_heap_committed_bytes` | NMT runs only |

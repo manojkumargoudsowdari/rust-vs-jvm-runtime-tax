@@ -28,9 +28,9 @@ regenerated from raw `results/` data.
 | `pipeline-rust/` | Native pipeline: rustc 1.81.0, `arrow`/`parquet` 53.4.1; system or mimalloc allocator |
 | `pipeline-scala/` | JVM pipeline: Scala 3.5.0, Temurin JDK 21.0.4+7, parquet-java 1.14.4 |
 | `docker/` | Images (base images pinned by digest), in-container wrapper, core picker |
-| `bench/` | `run.py` harness, `configs.yaml` matrix, cgroup sampler, JFR parser, `verify.py` |
+| `bench/` | `run.py` (production-style matrix), `heapsweep.py` (H_min search + heap sweep), `harness.py` (shared), `configs.yaml`, cgroup sampler, JFR parser, `verify.py` |
 | `profiling/` | JFR settings (`gc.jfc`) |
-| `analysis/` | `analyze.py` (statistics, figures, LaTeX tables), `cost.yaml` (rates you supply) |
+| `analysis/` | `analyze.py` (statistics, figures, LaTeX tables), `heapsweep.py` (heap-sweep figures/tables), `cost.yaml` (rates you supply) |
 | `results/` | Raw run output (git-ignored; schema in `results/README.md`) |
 | `docs/` | `paper-deltas.md` (facts the paper must reflect), `fat-jar-merge.md` (dependency merge audit) |
 | `PLAN.md` | Design rationale and status log |
@@ -56,9 +56,14 @@ For each batch:
 Partial results are merged in unit order, so floating-point sums are
 reproducible and the two languages agree to the bit.
 
-**Per-batch latency** is the time to process one 8,192-row batch: decode,
-materialize, filter, transform and aggregate. Opening a unit is logged
-separately as `setup_nanos`. See `PLAN.md` §3 for the full specification.
+**Latency.** The primary metric is **per-unit latency**: the time to process
+one full 65,536-row row group, including opening the file and preparing the
+row group. Its scope is identical in both languages.
+
+The secondary metric is **per-batch latency**: the time for one 8,192-row
+batch, excluding setup. It is not symmetric, because parquet-java loads the
+whole row group during setup while arrow-rs reads pages lazily inside
+batches. See `PLAN.md` §3 for the full specification.
 
 ## Dataset presets
 
@@ -121,9 +126,27 @@ make datagen PRESET=full            # ≈1 TB; passes --yes for you
 make bench DATA=data/small WARMUP_DATA=data/small
 make bench DATA=data/full  WARMUP_DATA=data/small
 
-# 5. Analysis: latest results directory by default (or RESULTS=results/<ts>)
+# 5. Heap-size sweep (H_min search + 1.25x-4x H_min; small preset by default)
+make heapsweep
+
+# 6. Analysis: latest results directory by default (or RESULTS=results/<ts>)
 make plot
 ```
+
+**Two JVM experiments.**
+- `make bench` runs the *production-style* JVM configuration: a fixed,
+  pre-touched 3 GiB heap, as a capacity-planned service would run. Its memory
+  figure reflects the setting.
+- `make heapsweep` measures what each collector actually needs, following
+  Hertz & Berger (OOPSLA 2005):
+  1. Binary-search the smallest heap `H_min` that completes (128 MiB steps; a
+     heap size passes only if 3 of 3 attempts complete).
+  2. Run each collector at 1.25×, 1.5×, 2×, 3× and 4× its own `H_min`, with
+     `-Xms = -Xmx` and **no pre-touch**. Points that don't fit the 4 GB
+     cgroup alongside a 768 MiB off-heap reserve are skipped.
+  3. Rust runs alongside as flat reference lines.
+
+  Its outputs are CPU-seconds vs heap size and M_peak vs heap size.
 
 `make bench` calls `bench/run.py`. Useful options:
 - `--configs rust-system,scala-g1` runs a subset of configurations
@@ -143,7 +166,8 @@ Fill in `analysis/cost.yaml` with a per-vCPU-hour rate and its source before
 | Wall time | in-container start/end of the pipeline process (includes JVM startup); the pipeline's own main→fsync time is also logged |
 | **M_peak** | max over 10 Hz host samples of `memory.stat anon + shmem`. `shmem` is required because ZGC backs its heap with memfd shared memory. |
 | Page cache, `memory.current`, `memory.peak` | reported separately; never part of M_peak |
-| Per-batch latency | `batches.csv` from both pipelines |
+| Per-unit latency (primary) and per-batch latency (secondary) | `batches.csv` from both pipelines |
+| H_min and heap-sweep curves | `bench/heapsweep.py` (JVM), with Rust reference runs in the same session |
 | GC pauses, heap used/committed | JFR (`profiling/gc.jfc`): `jdk.GCPhasePause`, `jdk.GarbageCollection`, `jdk.GCHeapSummary` |
 | JVM native memory | one extra NMT run per JVM config, excluded from timing statistics |
 | Cost | provisioned (4 vCPU × wall time) and consumed vCPU-hours × your `cost.yaml` rate |
@@ -162,6 +186,9 @@ Figures are 3.5-inch IEEE single-column PDF/PNG with embedded fonts, and
 tables are booktabs `.tex` for `\input{}`.
 
 ## Configurations
+
+Production-style matrix (`make bench`). The heap sweep reuses the same GC
+flags with its own heap sizes and no pre-touch.
 
 | Name | Runtime | Flags |
 |---|---|---|
@@ -212,10 +239,15 @@ conflicts. See `docs/fat-jar-merge.md`.
      per-value `Binary` objects.
 
    Part of any measured gap is library design, not the language runtime.
-2. **Heap sizing fixes the JVM's footprint.** With `-Xms3G` and
-   `AlwaysPreTouch`, JVM M_peak is at least 3 GB by construction. Read M_peak
-   as "memory the configuration holds," not "memory the workload needs." A
-   minimum-heap experiment is planned (`PLAN.md` §7).
+2. **Heap sizing fixes the JVM's footprint.** In the production-style runs,
+   `-Xms3G` with `AlwaysPreTouch` puts JVM M_peak at 3 GB or more by
+   construction. Read that figure as "memory the configuration holds." The
+   heap sweep measures "memory the workload needs."
+
+   `H_min` depends on the dataset and on the 128 MiB search granularity, and
+   it is measured on the small preset. Its 3-of-3 pass rule makes it
+   conservative, but it is not a guarantee: a run near 1.25× `H_min` can
+   still fail occasionally. Such failures are counted and reported per point.
 3. **Hash maps follow each language's idiom:** Rust's std `HashMap` (SipHash)
    versus Scala's `mutable.LongMap` (open addressing, no key boxing).
 4. **JIT warm-up is included.** Each run is a fresh process, as in a batch

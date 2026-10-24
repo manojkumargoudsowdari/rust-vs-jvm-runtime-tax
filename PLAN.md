@@ -118,17 +118,20 @@ two outputs are bit-identical and reproducible across runs.
 
 - `batches.csv`: `batch_id,worker,start_nanos,rows,nanos,setup_nanos`
   - `batch_id` = `<file_idx>-<row_group>-<batch_idx>`
-  - **Per-batch latency (the paper's definition) = `nanos` = time to process
-    one 8,192-row record batch**: decode + materialize rows + filter +
-    transform + aggregate.
+  - `nanos` = time to process one 8,192-row record batch: decode +
+    materialize rows + filter + transform + aggregate.
   - `setup_nanos` (non-zero only on batch 0 of each unit) = opening the file,
-    reading the footer and preparing the row-group reader. It is logged
-    separately so that batch latency is not polluted by per-unit setup.
-    Note the library asymmetry: parquet-java's `readRowGroup` reads the whole
-    row group from disk during setup, whereas arrow-rs reads pages lazily, so
-    Rust's page I/O falls inside `nanos` and Scala's inside `setup_nanos`.
-    The analysis therefore also reports `nanos + setup_nanos` per unit as a
-    sensitivity check.
+    reading the footer and preparing the row-group reader.
+  - **PRIMARY latency metric = per-unit latency = `setup_nanos` + Σ `nanos`
+    over one full 65,536-row row-group unit.** The scope is identical in both
+    languages regardless of where each library does its I/O. Each file's last,
+    shorter row group is excluded.
+  - **SECONDARY metric = per-batch latency (`nanos`)**, with a known
+    asymmetry: parquet-java's `readRowGroup` reads the whole row group from
+    disk during setup, whereas arrow-rs reads pages lazily, so Rust's page I/O
+    falls inside `nanos` and Scala's inside `setup_nanos`.
+  - Both are reported as p50/p95/p99/p99.9 with cluster-bootstrap CIs
+    (resampling whole runs).
   - `start_nanos` is relative to process start (for correlating with GC).
   - Rows are buffered in memory and written after processing ends.
 - `summary.json`: `lang, workers, batch_size, files, units, rows_read,
@@ -198,9 +201,32 @@ reported separately with `memory.current` and `memory.peak`.
 GC. One extra run per JVM config adds `-XX:NativeMemoryTracking=summary
 -XX:+PrintNMTStatistics`; these `nmt` runs are excluded from timing stats.
 
-**Minimum-heap experiment (TODO).** Because `-Xms3G` + `AlwaysPreTouch` fixes
-JVM footprint ≥ 3 GB by construction, a separate experiment should bisect the
-smallest `-Xmx` at which each GC completes the small preset.
+**Production-style vs heap sweep.** The fixed `-Xms3G -Xmx3G
+-XX:+AlwaysPreTouch` matrix above is the *production-style* configuration
+(capacity-planned service); its JVM M_peak reflects the setting. The heap
+sweep measures the need.
+
+**Heap sweep (`bench/heapsweep.py`, `make heapsweep`; Hertz & Berger,
+OOPSLA 2005).** Default dataset: small preset.
+1. *H_min search* per collector (G1, generational ZGC, Parallel): probe the
+   upper bound (3072 MiB) first — its wall time sets the probe timeout
+   (max(120 s, 10 × wall)) — then 128 MiB, then bisect at 128 MiB
+   granularity keeping "lo fails, hi passes". A probe runs up to 3 attempts
+   with `-Xms=-Xmx`, no pre-touch, no JFR; it passes only if all 3 exit 0
+   (a Java OOME, cgroup OOM kill, other non-zero exit or timeout fails it,
+   and stops the remaining attempts). H_min = smallest passing heap.
+2. *Sweep* each collector at 1.25×, 1.5×, 2×, 3×, 4× its own H_min
+   (rounded up to 1 MiB), skipping points where heap + 768 MiB off-heap
+   reserve > 4096 MiB (recorded as skipped). `-Xms=-Xmx`, **no
+   `-XX:+AlwaysPreTouch`**, JFR on.
+3. 1 warm-up per point first, then N = 10 measured runs per point plus 10 per
+   Rust reference (system, mimalloc), interleaved in seeded random order.
+4. Recorded per run: CPU-seconds, wall, M_peak, GC pause percentiles, total
+   pause time (Σ `jdk.GCPhasePause`), total GC-cycle time
+   (Σ `jdk.GarbageCollection` durations), plus the usual columns.
+5. `analysis/heapsweep.py`: CPU-seconds vs heap multiple and M_peak vs heap
+   multiple (one line per collector, Rust as horizontal lines), H_min table,
+   per-point table. Dry-run watermark logic as in `analyze.py`.
 
 **Protocol.** Page cache dropped before every run. 2 JVM warm-up runs per JVM
 config on the warm-up dataset (discarded). N = 10 measured runs per config in
@@ -272,6 +298,19 @@ booktabs LaTeX tables.
   - Measurement bug found and fixed: M_peak changed from `anon` to
     `anon + shmem` (ZGC heap is memfd/shmem). NMT parser fixed for JDK 21's
     byte-scaled output.
+
+- **2026-10-24 — heap-sweep milestone** (development machine; dry runs only,
+  *no performance numbers recorded*):
+  - Primary latency metric switched to per-unit (setup + all batches of a
+    full 65,536-row unit); per-batch kept as secondary. Tail quantiles are
+    suppressed below 10/(1−q) samples.
+  - `bench/harness.py` factored out of `run.py`; adds per-run timeout,
+    Java-OOME detection and a missing-output guard.
+  - Heap sweep dry run (dev preset, 2 runs/point): H_min search completed
+    for all three collectors (6 probes each, all failures detected as Java
+    OOME); 15 sweep points + 2 Rust references; 70 outputs bit-identical;
+    figures and tables generated (watermarked).
+  - eBPF removed from the plan; measurement is cgroup v2 counters at 10 Hz.
 
 ## 11. Order of work
 
