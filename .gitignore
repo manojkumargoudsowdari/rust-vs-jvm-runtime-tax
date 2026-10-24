@@ -1,0 +1,19 @@
+# Build output
+target/
+pipeline-scala/target/
+pipeline-scala/project/target/
+pipeline-scala/project/project/
+pipeline-scala/.bsp/
+
+# Generated data and run artefacts
+data/
+out/
+*.parquet
+*.jfr
+
+# Raw benchmark runs are archived separately (Zenodo); keep the schema docs.
+results/*/
+
+__pycache__/
+*.pyc
+.venv/

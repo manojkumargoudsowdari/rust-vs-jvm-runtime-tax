@@ -1,0 +1,5 @@
+# Resolve dependencies to versions whose rust-version is compatible with the
+# workspace MSRV (1.81). Honoured by cargo >= 1.84 when (re)generating
+# Cargo.lock; ignored by older cargo, which simply uses the committed lock.
+[resolver]
+incompatible-rust-versions = "fallback"

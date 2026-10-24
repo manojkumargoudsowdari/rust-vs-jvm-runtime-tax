@@ -1,0 +1,19 @@
+[workspace]
+resolver = "2"
+members = ["datagen", "pipeline-rust"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.81"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+arrow = { version = "=53.4.1", default-features = false }
+parquet = { version = "=53.4.1", default-features = false, features = ["arrow"] }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"

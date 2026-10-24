@@ -1,0 +1,22 @@
+[package]
+name = "pipeline-rust"
+description = "Native Rust ETL pipeline for the runtime-tax benchmark"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "pipeline-rust"
+path = "src/main.rs"
+
+[features]
+default = ["system"]
+# Allocator selection; exactly one must be enabled.
+system = []
+mimalloc = ["dep:mimalloc"]
+
+[dependencies]
+arrow = { workspace = true }
+parquet = { workspace = true }
+mimalloc = { version = "=0.1.43", default-features = false, optional = true }

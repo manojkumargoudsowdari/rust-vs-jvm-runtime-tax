@@ -1,0 +1,14 @@
+[package]
+name = "datagen"
+description = "Deterministic synthetic Parquet generator for the runtime-tax benchmark"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+arrow = { workspace = true }
+parquet = { workspace = true }
+rand = { version = "=0.8.5", default-features = false, features = ["std"] }
+rand_chacha = "=0.3.1"
+rand_distr = "=0.4.3"
