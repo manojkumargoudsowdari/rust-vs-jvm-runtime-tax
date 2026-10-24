@@ -122,16 +122,27 @@ make images
 make datagen PRESET=small
 make datagen PRESET=full            # ≈1 TB; passes --yes for you
 
-# 4. Benchmark: small preset first to validate the host, then the full preset
-make bench DATA=data/small WARMUP_DATA=data/small
-make bench DATA=data/full  WARMUP_DATA=data/small
+# 4. Calibrate: one rust-system + one scala-g1 run; prints projected run times
+make calibrate
 
-# 5. Heap-size sweep (H_min search + 1.25x-4x H_min; small preset by default)
+# 5. Heap-size sweep on the small preset, then validate its H_min on the full preset
 make heapsweep
+make heapsweep-validate            # SWEEP=results/<ts>-heapsweep, default: latest
 
-# 6. Analysis: latest results directory by default (or RESULTS=results/<ts>)
+# 6. Production-style comparison on the full preset
+make bench DATA=data/full WARMUP_DATA=data/small
+
+# 7. Analysis (RESULTS=results/<ts>; default: latest bench or heap-sweep directory)
 make plot
+make plot RESULTS=results/<ts>-heapsweep VALIDATION=results/<ts>-heapsweep-validate
 ```
+
+| Experiment | Preset | What it gives |
+|---|---|---|
+| `make calibrate` | small | measured per-run times and projected totals for everything below |
+| `make heapsweep` | small | H_min, measured off-heap reserves, CPU and M_peak vs heap size |
+| `make heapsweep-validate` | full | whether the small-preset H_min holds on 950 M rows (3 attempts each at H_min and 1.25 × H_min) |
+| `make bench` | full | production-style CPU, wall, M_peak, latency, GC pauses, cost |
 
 **Two JVM experiments.**
 - `make bench` runs the *production-style* JVM configuration: a fixed,
@@ -139,12 +150,17 @@ make plot
   figure reflects the setting.
 - `make heapsweep` measures what each collector actually needs, following
   Hertz & Berger (OOPSLA 2005):
-  1. Binary-search the smallest heap `H_min` that completes (128 MiB steps; a
-     heap size passes only if 3 of 3 attempts complete).
-  2. Run each collector at 1.25×, 1.5×, 2×, 3× and 4× its own `H_min`, with
-     `-Xms = -Xmx` and **no pre-touch**. Points that don't fit the 4 GB
-     cgroup alongside a 768 MiB off-heap reserve are skipped.
-  3. Rust runs alongside as flat reference lines.
+  1. Measure each collector's off-heap memory with one NMT run at a 3 GiB
+     heap. Its reserve is 1.5× that (rounded up to 64 MiB, at least 512 MiB),
+     and its heap cap is 4,096 MiB minus the reserve.
+  2. Binary-search the smallest heap `H_min` that completes (128 MiB steps; a
+     heap size passes only if 3 of 3 attempts complete), using exactly the
+     sweep's JVM flags, JFR included.
+  3. Run each collector at 1.25×, 1.5×, 2×, 3× and 4× its own `H_min`, with
+     `-Xms = -Xmx` and **no pre-touch**. Points above the cap are skipped and
+     recorded with the reason. Failed runs are not retried; the table shows
+     completed/total, e.g. 9/10.
+  4. Rust runs alongside as flat reference lines.
 
   Its outputs are CPU-seconds vs heap size and M_peak vs heap size.
 

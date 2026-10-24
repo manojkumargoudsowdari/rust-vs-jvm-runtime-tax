@@ -55,14 +55,18 @@ heapsweep:
     low_mib: 128             # lower bound tried first (passes => H_min = low_mib)
     high_mib: 3072           # must pass; the production-style heap
     granularity_mib: 128
-    attempts: 3              # a probe passes only if all attempts succeed
+    attempts: 3              # a probe passes only if all attempts succeed (same JVM flags as the sweep, JFR on)
     timeout_factor: 10       # probe timeout = factor x wall time of the high_mib probe ...
     timeout_min_s: 120       # ... but never less than this
   multiples: [1.25, 1.5, 2, 3, 4]
-  # heap + off-heap must fit the 4096 MiB cgroup. NMT on a 3 GiB heap measured
-  # ~200-250 MiB non-heap committed (dev preset); 768 MiB leaves headroom for
-  # metaspace, thread stacks, direct buffers and JFR. Points above the cap are skipped.
+  # heap + off-heap must fit the cgroup. The off-heap reserve is MEASURED per
+  # collector: one NMT run at search.high_mib on the sweep dataset;
+  # reserve = factor x non-heap committed, rounded up to round_mib, at least
+  # floor_mib; heap cap = cgroup_mib - reserve. Points above the cap are skipped.
   cgroup_mib: 4096
-  offheap_reserve_mib: 768
+  reserve:
+    factor: 1.5
+    round_mib: 64
+    floor_mib: 512
   runs: 10                   # measured runs per (collector, multiple) and per reference
   warmup_runs: 1             # per (collector, multiple); discarded

@@ -208,17 +208,23 @@ sweep measures the need.
 
 **Heap sweep (`bench/heapsweep.py`, `make heapsweep`; Hertz & Berger,
 OOPSLA 2005).** Default dataset: small preset.
+0. *Off-heap reserve, measured* per collector: one NMT run at 3,072 MiB on
+   the sweep dataset; non-heap = NMT total committed − Java heap committed;
+   reserve_c = max(512, ⌈1.5 × non-heap / 64⌉ × 64) MiB; heap cap_c =
+   4,096 − reserve_c. Measured value, reserve and cap are recorded in
+   `hmin.json`, the manifest and the H_min table.
 1. *H_min search* per collector (G1, generational ZGC, Parallel): probe the
    upper bound (3072 MiB) first — its wall time sets the probe timeout
    (max(120 s, 10 × wall)) — then 128 MiB, then bisect at 128 MiB
    granularity keeping "lo fails, hi passes". A probe runs up to 3 attempts
-   with `-Xms=-Xmx`, no pre-touch, no JFR; it passes only if all 3 exit 0
-   (a Java OOME, cgroup OOM kill, other non-zero exit or timeout fails it,
-   and stops the remaining attempts). H_min = smallest passing heap.
+   with **exactly the sweep's JVM flags** (`-Xms=-Xmx`, no pre-touch, JFR
+   and GC logging on); it passes only if all 3 exit 0 (a Java OOME, cgroup
+   OOM kill, other non-zero exit or timeout fails it, and stops the
+   remaining attempts). H_min = smallest passing heap.
 2. *Sweep* each collector at 1.25×, 1.5×, 2×, 3×, 4× its own H_min
-   (rounded up to 1 MiB), skipping points where heap + 768 MiB off-heap
-   reserve > 4096 MiB (recorded as skipped). `-Xms=-Xmx`, **no
-   `-XX:+AlwaysPreTouch`**, JFR on.
+   (rounded up to 1 MiB), skipping points above cap_c (recorded with the
+   reason). Failed measured runs are counted, never retried; tables show
+   completed/total per point (e.g. "9/10").
 3. 1 warm-up per point first, then N = 10 measured runs per point plus 10 per
    Rust reference (system, mimalloc), interleaved in seeded random order.
 4. Recorded per run: CPU-seconds, wall, M_peak, GC pause percentiles, total
@@ -233,6 +239,22 @@ config on the warm-up dataset (discarded). N = 10 measured runs per config in
 an order shuffled with a recorded seed. 1 NMT run per JVM config at the end.
 After all runs: JFR parsed with `jfr print --json` (`bench/jfrparse.py`), and
 every run's `output.parquet` is checked bit-identical.
+
+**Preset plan for the paper.**
+
+| Experiment | Preset | Target |
+|---|---|---|
+| Calibration (`make calibrate`) | small | 1 rust-system + 1 scala-g1 (3 GiB) run; prints projected totals for bench small/full, heap sweep and validation. Run first on the host; starts nothing long. |
+| Heap sweep (`make heapsweep`) | **small** (10 M rows) | H_min, reserves, CPU/M_peak vs heap multiple |
+| H_min validation (`make heapsweep-validate`) | **full** (950 M rows) | per collector, 3 attempts each at the small-preset H_min and at ⌈1.25 × H_min⌉, all attempts run |
+| Production-style comparison (`make bench`) | **full** (950 M rows) | headline CPU, wall, M_peak, latency, GC, cost |
+
+Rationale: the workload streams with bounded state (720 hourly groups,
+4 workers × one row group in flight), so H_min should not depend on dataset
+size. That assumption is *tested*, not assumed: validation passes only if
+both probes complete 3/3 on the full preset. Any disagreement is reported
+as a finding (and the sweep's H_min must then be qualified as
+small-preset-specific).
 
 **Manifest.** git SHA/dirty/describe, host (OS, kernel, CPU model, logical
 CPUs, SMT control/active, governors, cpufreq driver, boost/turbo state, THP,
@@ -311,6 +333,19 @@ booktabs LaTeX tables.
     OOME); 15 sweep points + 2 Rust references; 70 outputs bit-identical;
     figures and tables generated (watermarked).
   - eBPF removed from the plan; measurement is cgroup v2 counters at 10 Hz.
+
+- **2026-10-24 — pre-host milestone** (dry runs only, *no performance
+  numbers recorded*):
+  - H_min probes now use exactly the sweep's JVM flags (JFR on); dry-run
+    search re-run and completed for all three collectors.
+  - Off-heap reserve measured per collector with NMT at 3,072 MiB
+    (dev dry run: non-heap 185–222 MiB → 512 MiB floor applies).
+  - Point tables report completed/total ("9/10").
+  - `make calibrate` and `make heapsweep-validate` added and dry-run
+    (validation exercised dev → small; all collectors 3/3 at 1× and 1.25×).
+  - Wall time moved from the realtime clock to `/proc/uptime` after the
+    calibration dry run showed a VM clock step (realtime 12.45 s vs uptime
+    10.89 s for the same run).
 
 ## 11. Order of work
 

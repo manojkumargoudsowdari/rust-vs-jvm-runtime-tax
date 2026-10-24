@@ -10,10 +10,12 @@ PYTHON ?= python3
 SCALA_JAR := pipeline-scala/target/scala-3.5.0/pipeline-scala.jar
 JVM_HEAP := -Xms3G -Xmx3G
 BENCH_ARGS ?=
-RESULTS ?= $(lastword $(sort $(wildcard results/2*)))
+RESULTS ?= $(lastword $(sort $(filter-out %-calibrate %-calibrate-dryrun %-validate %-validate-dryrun,\
+	$(wildcard results/2*))))
+VALIDATION ?=
 
 .PHONY: build build-rust build-rust-mimalloc build-scala datagen run verify test \
-        images bench heapsweep plot clean
+        images calibrate bench heapsweep heapsweep-validate plot clean
 
 # --------------------------------------------------------------- native build + correctness
 
@@ -58,15 +60,30 @@ images:
 bench: images
 	$(PYTHON) bench/run.py --data $(DATA) --warmup-data $(WARMUP_DATA) $(if $(DRY_RUN),--dry-run) $(BENCH_ARGS)
 
+# One rust-system + one scala-g1 run on the small preset; prints projected totals.
+# Run this first on a new host. It starts nothing long.
+calibrate: images
+	$(PYTHON) bench/calibrate.py --data data/small $(if $(DRY_RUN),--dry-run) $(BENCH_ARGS)
+
 # Heap-size sweep (H_min search + multiples of H_min); defaults to the small preset.
 HEAPSWEEP_DATA ?= data/small
 heapsweep: images
 	$(PYTHON) bench/heapsweep.py --data $(HEAPSWEEP_DATA) $(if $(DRY_RUN),--dry-run) $(BENCH_ARGS)
 
+# Check that the small-preset H_min holds on the full preset: probe H_min and
+# 1.25x H_min per collector, 3 attempts each. SWEEP defaults to the latest sweep.
+SWEEP ?= $(lastword $(sort $(filter-out %-validate %-validate-dryrun,$(wildcard results/*-heapsweep*))))
+VALIDATE_DATA ?= data/full
+heapsweep-validate: images
+	@test -n "$(SWEEP)" || { echo "no heap-sweep results; run 'make heapsweep' first"; exit 1; }
+	$(PYTHON) bench/heapsweep.py --data $(VALIDATE_DATA) --validate-from $(SWEEP) \
+		$(if $(DRY_RUN),--dry-run) $(BENCH_ARGS)
+
 plot:
 	@test -n "$(RESULTS)" || { echo "no results/ directory; run 'make bench' first"; exit 1; }
 	@case "$(RESULTS)" in \
-	  *heapsweep*) $(PYTHON) analysis/heapsweep.py $(RESULTS) $(if $(DRY_RUN),--allow-dry-run) ;; \
+	  *heapsweep*) $(PYTHON) analysis/heapsweep.py $(RESULTS) $(if $(DRY_RUN),--allow-dry-run) \
+	      $(if $(VALIDATION),--validation $(VALIDATION)) ;; \
 	  *) $(PYTHON) analysis/analyze.py $(RESULTS) $(if $(DRY_RUN),--allow-dry-run) ;; \
 	esac
 

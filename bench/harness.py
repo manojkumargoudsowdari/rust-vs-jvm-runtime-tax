@@ -27,7 +27,7 @@ JFC = "/opt/rvj/gc.jfc"
 
 RUN_COLUMNS = [
     "run_id", "config", "kind", "order", "preset", "dry_run", "exit_code", "oom_killed", "java_oom", "timed_out",
-    "wall_ns", "host_wall_ns", "pipeline_wall_ns",
+    "wall_ns", "wall_realtime_ns", "host_wall_ns", "pipeline_wall_ns",
     "cpu_usage_usec", "cpu_user_usec", "cpu_system_usec", "cpu_throttled_usec",
     "peak_private_bytes", "peak_anon_bytes", "peak_shmem_bytes", "peak_pagecache_bytes", "peak_file_bytes",
     "peak_kernel_bytes", "peak_current_bytes", "memory_peak_bytes", "samples",
@@ -176,6 +176,16 @@ def parse_nmt(stdout: Path, run_dir: Path) -> dict:
             "nmt_heap_committed_bytes": committed(r"Java Heap \(")}
 
 
+def uptime_ns(wrapper: dict) -> int | None:
+    """Wall time from the wrapper's /proc/uptime readings (decimal seconds, 10 ms resolution)."""
+    try:
+        whole = [s.split(".") for s in (wrapper["start_uptime_s"], wrapper["end_uptime_s"])]
+        (s0, f0), (s1, f1) = [(int(a), int(b.ljust(9, "0")[:9])) for a, b in whole]
+    except (KeyError, ValueError, TypeError):
+        return None
+    return (s1 - s0) * 1_000_000_000 + (f1 - f0)
+
+
 def execute(cfg: dict, *, image: str, command: list[str], run_dir: Path, data: Path, cpuset: str | None,
             drop: bool, dry_run: bool, timeout_s: float | None = None) -> dict:
     """Run one container under the resource envelope; return the measurement row."""
@@ -238,7 +248,10 @@ def execute(cfg: dict, *, image: str, command: list[str], run_dir: Path, data: P
         "run_id": run_dir.name, "dry_run": dry_run, "exit_code": exit_code, "oom_killed": oom,
         "java_oom": stderr.exists() and "OutOfMemoryError" in stderr.read_text(errors="replace"),
         "timed_out": timed_out,
-        "wall_ns": wrapper["end_ns"] - wrapper["start_ns"] if wrapper else None,
+        # Primary wall time from /proc/uptime (immune to NTP/VM clock steps, 10 ms
+        # resolution); the realtime-clock difference is kept for reference.
+        "wall_ns": uptime_ns(wrapper),
+        "wall_realtime_ns": wrapper["end_ns"] - wrapper["start_ns"] if wrapper else None,
         "host_wall_ns": host_wall_ns,
         "pipeline_wall_ns": summary.get("wall_nanos"),
         "cpu_usage_usec": cpu.get("usage_usec"), "cpu_user_usec": cpu.get("user_usec"),

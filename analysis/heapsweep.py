@@ -31,7 +31,30 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("results", type=Path)
     ap.add_argument("--allow-dry-run", action="store_true",
                     help="analyse a dry run (outputs are watermarked and must not be published)")
+    ap.add_argument("--validation", type=Path,
+                    help="results/<ts>-heapsweep-validate directory: also emit table_heapsweep_validate.tex")
     return ap.parse_args()
+
+
+def validation_table(vdir: Path, out: Path, allow_dry_run: bool) -> None:
+    vmanifest, _ = load(vdir, allow_dry_run)
+    report = json.loads((vdir / "validation.json").read_text())
+    dry = bool(vmanifest.get("dry_run"))
+    preset = (vmanifest["dataset"].get("datagen") or {}).get("preset", "?")
+    rows = []
+    for c in ordered(report):
+        e = report[c]
+        if "error" in e:
+            rows.append([c, "--", "--", "--", e["error"]])
+            continue
+        res = {p["multiple"]: f"{p['attempts_ok']}/{p['attempts_run']}" for p in e["probes"]}
+        rows.append([c, fmt(e["h_min_small_mib"], 0), res.get(1.0, "--"), res.get(1.25, "--"),
+                     "yes" if e["agrees"] else "\\textbf{no}"])
+    write_table(out, "table_heapsweep_validate",
+                ["Collector", "$H_{\\min}$ small (MiB)", f"$1\\times$ on {preset}", f"$1.25\\times$ on {preset}",
+                 "Agrees"], rows,
+                f"source: {vdir.name}; attempts completed / attempts run at H_min and ceil(1.25 x H_min) "
+                "from the small-preset search, same JVM flags; all attempts run", dry)
 
 
 def sweep_figure(points: pd.DataFrame, refs: dict, metric: str, ylabel: str, out: Path, name: str,
@@ -120,30 +143,43 @@ def main() -> int:
     sweep_figure(points, refs, "mpeak_mib", r"$M_{\mathrm{peak}}$ (MiB)", out, "fig_heapsweep_mpeak", dry)
 
     # ---- tables
-    write_table(out, "table_heapsweep_hmin", ["Collector", "$H_{\\min}$ (MiB)", "Probes", "Attempts/probe"],
-                [[c, fmt(r.get("h_min_mib"), 0), str(len(r.get("probes", []))), str(r.get("attempts", "--"))]
-                 for c, r in ((c, hmin[c]) for c in ordered(hmin))],
-                note + f"; smallest -Xms=-Xmx (granularity {next(iter(hmin.values())).get('granularity_mib', 128)} "
-                "MiB) completing every attempt; no AlwaysPreTouch", dry)
+    def reserve(c, key):
+        return (hmin[c].get("reserve") or {}).get(key)
+
+    write_table(out, "table_heapsweep_hmin",
+                ["Collector", "$H_{\\min}$ (MiB)", "Probes", "Non-heap (MiB)", "Reserve (MiB)", "Heap cap (MiB)"],
+                [[c, fmt(hmin[c].get("h_min_mib"), 0), str(len(hmin[c].get("probes", []))),
+                  fmt(reserve(c, "nonheap_committed_mib"), 0), fmt(reserve(c, "reserve_mib"), 0),
+                  fmt(reserve(c, "cap_mib"), 0)] for c in ordered(hmin)],
+                note + "; H_min = smallest -Xms=-Xmx (128 MiB steps) completing all attempts per probe, same "
+                "flags as the sweep incl. JFR, no AlwaysPreTouch; Non-heap = NMT committed minus Java heap at "
+                "3,072 MiB; Reserve = max(512, 1.5 x non-heap rounded up to 64 MiB); cap = 4,096 - reserve", dry)
+    for p in manifest.get("skipped_points", []):
+        print(f"skipped: {p['collector']} {p['multiple']}x ({p['heap_mib']} MiB): {p.get('reason')}")
     body = []
     for c in ordered(points["collector"]):
         for _, p in points[points["collector"] == c].sort_values("multiple").iterrows():
-            body.append([c, f"{p['multiple']:g}", str(p["heap_mib"]), f"{p['runs_ok']}"
-                         + (f" ({p['runs_failed']} failed)" if p["runs_failed"] else ""),
+            body.append([c, f"{p['multiple']:g}", str(p["heap_mib"]),
+                         f"{p['runs_ok']}/{p['runs_ok'] + p['runs_failed']}",
                          pm(p["cpu_s_mean"], p["cpu_s_ci95"]), pm(p["mpeak_mib_mean"], p["mpeak_mib_ci95"], 0),
                          fmt(p["gc_pause_p99_ms"], 2) if p["gc_pauses"] >= 1000 else "--",
                          fmt(p["gc_pause_total_s_mean"], 2),
                          fmt(p["gc_cycle_total_s_mean"], 2)])
     for r in ordered(refs):
         s = refs[r]
-        body.append([r, "--", "--", str(s["cpu_s"]["n"]), pm(s["cpu_s"]["mean"], s["cpu_s"]["ci95"]),
+        done = s["cpu_s"]["n"]
+        body.append([r, "--", "--", f"{done}/{done + s['runs_failed']}", pm(s["cpu_s"]["mean"], s["cpu_s"]["ci95"]),
                      pm(s["mpeak_mib"]["mean"], s["mpeak_mib"]["ci95"], 0), "--", "--", "--"])
     write_table(out, "table_heapsweep",
-                ["Config", "$\\times H_{\\min}$", "Heap (MiB)", "$n$", "CPU (s)", "$M_{\\mathrm{peak}}$ (MiB)",
+                ["Config", "$\\times H_{\\min}$", "Heap (MiB)", "Completed", "CPU (s)", "$M_{\\mathrm{peak}}$ (MiB)",
                  "GC p99 (ms)", "Pause (s)", "GC cycles (s)"],
-                body, note + "; mean $\\pm$ 95% CI (t); -Xms=-Xmx, no AlwaysPreTouch; Pause = sum of "
+                body, note + "; Completed = successful/total measured runs (failures are not retried; "
+                "statistics use successful runs); mean $\\pm$ 95% CI (t); -Xms=-Xmx, no AlwaysPreTouch; Pause = sum of "
                 "GCPhasePause per run; GC cycles = sum of GarbageCollection durations per run (wall time, "
                 "includes concurrent phases); GC p99 shown only with >= 1000 pooled pauses", dry)
+
+    if args.validation:
+        validation_table(args.validation, out, args.allow_dry_run)
 
     print(f"heap-sweep analysis written to {out}" + ("  [DRY RUN]" if dry else ""))
     return 0
