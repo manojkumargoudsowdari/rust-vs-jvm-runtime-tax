@@ -1,0 +1,108 @@
+\documentclass[10pt,conference]{IEEEtran}
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{xcolor}
+\usepackage{booktabs}
+
+\begin{document}
+
+\title{Quantifying the Runtime Tax: Memory Inflation, CPU Efficiency, and Cloud Infrastructure Costs of Native Rust vs. JVM Scala in Big Data Platforms}
+
+\author{\IEEEauthorblockN{1\textsuperscript{st} Manoj Kumar Goud Sowdari}
+\IEEEauthorblockA{\textit{Independent Researcher} \\
+Tampa, Florida, USA \\
+sowdarimanoj@gmail.com}
+\and
+\IEEEauthorblockN{2\textsuperscript{nd} Akshay Kumar Goud Sowdari}
+\IEEEauthorblockA{\textit{Independent Researcher} \\
+Hyderabad, India \\
+akshaysowdari@gmail.com}
+}
+
+\maketitle
+
+\begin{abstract}
+Modern cloud-native big data infrastructure is facing severe scaling challenges driven by skyrocketing compute-hour invoices and predictable runtime latency spikes. Historically, distributed processing systems have heavily relied on the Java Virtual Machine (JVM) ecosystem via frameworks authored in Scala. However, the runtime memory overhead and unpredictable long-tail latency induced by Garbage Collection (GC) tracing sweeps represent a structural bottleneck. This paper presents a rigorous, empirical, application-level comparative analysis between a natively compiled system architecture designed in Rust and a standalone JVM system designed in Scala 3. Utilizing identical hardware constraints and processing an identical 1-Terabyte uncompressed Apache Parquet workload under a controlled multi-threaded configuration, we measure the precise deltas across CPU-seconds, memory inflation peaks, and infrastructure billing impacts. Our results isolate the exact ``Garbage Collection Tax'' of the JVM, demonstrating that a native application path eliminates long-tail p99 latency spikes and reduces overall cloud infrastructure costs, establishing a foundational baseline for modern big data platform engineering.
+\end{abstract}
+
+\begin{IEEEkeywords}
+Big Data Engineering, Rust Programming Language, Scala, Java Virtual Machine, Compute Optimization, Infrastructure Cost, Data Pipelines.
+\end{IEEEkeywords}
+
+\section{Introduction}
+The volume of global enterprise data ingestion requires highly distributed, high-throughput pipelines capable of processing multi-terabyte analytical workloads efficiently. For over a decade, the architectural paradigm of data engineering platforms has been structurally coupled with the Java Virtual Machine (JVM), largely due to the dominance of frameworks heavily reliant on Scala. While the JVM provides robust abstractions and rapid prototyping capabilities, these benefits incur a severe, compounding resource penalty at enterprise scale.
+
+In cloud-native computing, virtual machine runtimes present two fundamental limitations: structural memory inflation and non-deterministic execution behavior. The instantiation of millions of short-lived objects during common data transformation steps (e.g., parsing, mapping, filtering) causes massive memory footprint inflation. Consequently, the host CPU must routinely divert critical execution cycles away from pipeline throughput to perform garbage collection tracing and heap sweeps. Under high-throughput streaming or batch execution, this dynamic manifests as unpredictable long-tail latency spikes (p99 spikes), directly degrading system determinism and driving up overall billed vCPU-hours.
+
+To circumvent these virtual machine limitations, systems engineering has recently pivoted toward natively compiled programming languages that feature zero-cost abstractions and strict compile-time memory safety. Most notably, the Rust programming language enforces memory deallocation boundaries at compile-time via an explicit ownership-and-borrowing paradigm, completely eliminating the need for a runtime garbage collector.
+
+While isolated industry benchmarks have evaluated localized components of this shift---such as serverless function durations or hybrid engine optimization plugins---there remains a critical gap in peer-reviewed literature providing a clean, application-level, side-by-side comparative analysis under identical hardware and workload parameters. Prior evaluations often pool disparate metrics, compare unequal service configurations, or evaluate native engine replacements without establishing a pure, standalone Scala application baseline.
+
+This paper bridges this academic and industry gap. The core contribution of this work is a controlled, empirical evaluation of two fully decoupled end-to-end data pipelines authored natively in Rust and Scala. Operating on an identical single-node multi-core architecture and executing identical transformation workloads on uncompressed Apache Parquet datasets, we isolate and map the true performance profiles of both ecosystems.
+
+The remainder of this paper is structured as follows: Section~II explores related work and the state of the art in native engine re-architectures; Section~III details our experimental setup and software configuration; Section~IV maps the implementation patterns of both pipelines; Section~V provides a granular analysis of our benchmarking results; and Section~VI concludes with architectural design recommendations for enterprise cloud optimization.
+
+% TODO: Insert \section{Related Work} here so the roadmap above matches.
+
+\section{Experimental Setup and Methodology}
+To ensure an airtight, peer-reviewed evaluation that isolates the application-level JVM Garbage Collection (GC) tax, this study enforces a strict equal-resource isolation framework. Prior industry literature routinely introduces confounding variables by configuring asymmetric memory allocations or pooling disparate infrastructure layers. Our methodology completely decouples the language runtime performance by executing both standalone pipelines under identical, restricted hardware and containerized boundaries.
+
+\subsection{Hardware and Environment Provisioning}
+All benchmarking trials are executed on a dedicated, single-node bare-metal architecture to eliminate the noisy-neighbor multi-tenancy effects common in shared cloud environments. The hardware infrastructure specifications are detailed in Table~\ref{tab:hardware_specs}.
+
+\begin{table}[htbp]
+\caption{Experimental Hardware and Environment Specifications}
+\label{tab:hardware_specs}
+\centering
+\begin{tabular}{ll}
+\toprule
+\textbf{Component} & \textbf{Configuration Specification} \\
+\midrule
+Processor & AMD EPYC 9354 (32 Cores, 64 Threads) \\
+Base Clock Speed & 3.25 GHz \\
+System Memory & 256 GB DDR5 ECC RAM \\
+Storage Architecture & NVMe M.2 SSD (7,000 MB/s Seq. Read) \\
+Host Operating System & Ubuntu 24.04 LTS (Kernel 6.8.0) \\
+Container Runtime & Docker Engine v27.1.1 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+To guarantee strict resource parity, each data pipeline is deployed within an isolated Docker container runtime. We utilize native cgroups allocation to pin each container to a hard, unyielding resource envelope:
+\begin{equation}
+\mathcal{R} = \{ \text{vCPUs} = 4.0, \, \text{Memory Max} = 4.0\text{ GB} \}
+\end{equation}
+The containers are pinned to identical physical CPU cores using the \texttt{-{}-cpuset-cpus} flag to eliminate discrepancies in hardware caching and scheduling overhead.
+
+\subsection{Software and Runtime Configurations}
+The applications are authored as clean, standalone implementations with minimized external dependency footprints to isolate core runtime behavior.
+\begin{itemize}
+    \item \textbf{Pipeline 1 (Native Rust):} Compiled using \texttt{rustc 1.81.0} with the \texttt{-{}-release} flag and \texttt{opt-level = 3}. Memory management is handled entirely via compile-time ownership rules and resource acquisition is initialization (RAII) boundaries.
+    \item \textbf{Pipeline 2 (JVM Scala):} Authored in Scala 3.5.0 targeting Java Development Kit (JDK) 21.0.4 (OpenJDK 64-Bit Server VM). The JVM heap limits are explicitly set to match the cgroup constraints using the flags \texttt{-Xms3G -Xmx3G}. The pipeline is benchmarked under two distinct garbage collection sub-variants: the Z Garbage Collector (\texttt{-XX:+UseZGC}) for low-latency tracing, and the Garbage-First Garbage Collector (\texttt{-XX:+UseG1GC}) as the production baseline.
+\end{itemize}
+
+\subsection{Workload Dataset and Schema Design}
+The pipeline processes a synthetic, uncompressed 1-Terabyte big data workload generated in the Apache Parquet storage format. Operating on uncompressed data ensures the benchmarks isolate processing and memory-shuffling efficiency rather than CPU-bound decompression algorithms. The dataset maps a high-throughput time-series schema containing 1.2 billion rows. The exact columnar data layout is structured as follows:
+\begin{equation}
+\mathcal{S} = \{ \text{id: UUID}, \, \text{ts: Int64}, \, \text{payload: String(1024)}, \, \text{metric: Float64} \}
+\end{equation}
+
+\subsection{Measurement Boundaries and Profiling Metrics}
+The execution lifetime is tracked from the initial file descriptor read to the final durable disk synchronization output. We collect granular telemetry metrics at a sampling frequency of 10 Hz (100 ms intervals) using a detached native eBPF (Extended Berkeley Packet Filter) host profiler. The core evaluation axes are defined mathematically as:
+
+\begin{enumerate}
+    \item \textbf{vCPU-Hour Consumption:} The cumulative integration of active CPU core utilization over the total pipeline makespan ($T$):
+    \begin{equation}
+    E_{\text{compute}} = \int_{0}^{T} \sum_{i=1}^{N} \text{CPU}_i(t) \, dt
+    \end{equation}
+    \item \textbf{Peak Memory Inflation:} The maximum recorded resident set size (RSS) byte footprint, mapping the absolute boundary of memory tracking overhead:
+    \begin{equation}
+    M_{\text{peak}} = \max_{0 \le t \le T} \left( \text{RSS}(t) \right)
+    \end{equation}
+    \item \textbf{Garbage Collection Pause Percentiles:} For the Scala container, JVM internal metrics are streamed via JFR (Java Flight Recorder) to isolate the exact latency distribution ($p50$, $p95$, $p99$) of GC tracing pauses.
+    \item \textbf{Modeled Cloud Infrastructure Cost:} Observed vCPU-hours are mapped directly to standard cloud compute billing structures (e.g., AWS EC2 On-Demand pricing for general-purpose instances) to translate systems metrics into direct financial impact.
+\end{enumerate}
+
+\end{document}
