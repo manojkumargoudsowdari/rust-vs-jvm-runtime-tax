@@ -262,7 +262,7 @@ class Sweep:
                          heap_mib=p["heap_mib"], multiple=p["multiple"], timeout_s=timeouts.get(p["collector"]))
 
     def finish(self, failed_key: str, failed: list[str]) -> dict:
-        self.manifest["finished_utc"] = h.utc_stamp()
+        h.close_manifest(self.manifest)
         self.manifest["output_check"] = h.check_outputs(self.rows, self.runs_dir)
         self.manifest[failed_key] = failed
         self.save_manifest()

@@ -120,7 +120,19 @@ def base_manifest(cfg: dict, dry_run: bool, stamp: str, cpuset: str | None, cpus
         "drop_caches_effective": drop,
         "dataset": data,
         "config": cfg,
+        "clock_start": hostinfo.clock_state(),
     }
+
+
+def close_manifest(manifest: dict) -> None:
+    """Record finish time and end-of-run clock state (pair with `clock_start`)."""
+    manifest["finished_utc"] = utc_stamp()
+    end = hostinfo.clock_state()
+    manifest["clock_end"] = end
+    start = manifest.get("clock_start") or {}
+    if "realtime_minus_monotonic_ns" in start:
+        # ~0 unless the realtime clock was stepped (or slewed) during the experiment.
+        manifest["clock_realtime_drift_ns"] = end["realtime_minus_monotonic_ns"] - start["realtime_minus_monotonic_ns"]
 
 
 # --------------------------------------------------------------------------- commands

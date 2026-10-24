@@ -123,7 +123,7 @@ def main() -> int:
             row.update(h.parse_jfr(cfg, runs_dir / row["run_id"]))
     h.write_csv(out / "runs.csv", rows, h.RUN_COLUMNS)
 
-    manifest["finished_utc"] = h.utc_stamp()
+    h.close_manifest(manifest)
     manifest["output_check"] = h.check_outputs(rows, runs_dir)
     manifest["failed_runs"] = [r["run_id"] for r in rows if r["exit_code"] != 0]
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2))

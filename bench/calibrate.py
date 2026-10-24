@@ -117,7 +117,8 @@ def main() -> int:
                    "per_run_jvm_full_s": Jf, "row_scale": scale, "search_runs_per_collector": search_runs,
                    "sweep_runs_per_collector": sweep_runs},
     }
-    manifest.update({"calibration": measured, "projection": proj, "finished_utc": h.utc_stamp()})
+    manifest.update({"calibration": measured, "projection": proj})
+    h.close_manifest(manifest)
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2))
     (out / "calibration.json").write_text(json.dumps({"measured": measured, "projection": proj}, indent=2))
 

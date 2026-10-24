@@ -100,6 +100,22 @@ def host_section() -> dict:
     }
 
 
+def clock_state() -> dict:
+    """NTP/chrony state plus a realtime-vs-monotonic pair. Comparing the start and
+    end snapshots reveals a clock step during the run: realtime_minus_monotonic_ns
+    changes only by slewing (small) unless the realtime clock was stepped."""
+    import time
+    show = _run("timedatectl", "show") if shutil.which("timedatectl") else None
+    realtime, monotonic = time.time_ns(), time.monotonic_ns()
+    return {
+        "realtime_ns": realtime,
+        "monotonic_ns": monotonic,
+        "realtime_minus_monotonic_ns": realtime - monotonic,
+        "timedatectl_show": dict(l.split("=", 1) for l in show.splitlines() if "=" in l) if show else None,
+        "chronyc_tracking": _run("chronyc", "tracking") if shutil.which("chronyc") else None,
+    }
+
+
 def docker_section(image_refs: dict[str, str]) -> dict:
     info = _run("docker", "info", "--format",
                 "{{.ServerVersion}}|{{.CgroupDriver}}|{{.CgroupVersion}}|{{.KernelVersion}}") or "|||"
