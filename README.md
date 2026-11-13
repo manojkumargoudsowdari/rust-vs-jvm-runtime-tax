@@ -33,7 +33,7 @@ regenerated from raw `results/` data.
 | `analysis/` | `analyze.py` (statistics, figures, LaTeX tables), `heapsweep.py` (heap-sweep figures/tables), `compare_hosts.py` (VM vs metal), `cost.yaml` (rates you supply) |
 | `scripts/` | `ec2-setup.sh` (idempotent EC2 host setup), `export-results.sh` (archive results before stopping an instance) |
 | `results/` | Raw run output (git-ignored; schema in `results/README.md`) |
-| `docs/` | `aws.md` (running on EC2), `paper-deltas.md` (facts the paper must reflect), `fat-jar-merge.md` (dependency merge audit) |
+| `docs/` | `overview.md` (the project in plain words), `aws.md` (running on EC2), `paper-deltas.md` (facts the paper must reflect), `fat-jar-merge.md` (dependency merge audit) |
 | `PLAN.md` | Design rationale and status log |
 
 ## The workload
